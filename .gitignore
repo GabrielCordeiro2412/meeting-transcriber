@@ -1,0 +1,12 @@
+.derivedData/
+DerivedData/
+*.xcuserdata/
+*.xcuserstate
+.DS_Store
+backend/node_modules/
+backend/.env
+backend/.env.local
+backend/.meeting-notes-backend.log
+backend/.meeting-notes-backend.pid
+backend/supabase/.temp/
+supabase/.temp/
