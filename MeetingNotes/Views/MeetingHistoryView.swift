@@ -21,6 +21,13 @@ struct MeetingHistoryView: View {
                     }
                     .tag(session.id)
                     .contextMenu {
+                        Button {
+                            coordinator.selectSession(session)
+                            coordinator.retryProcessingSelectedSession()
+                        } label: {
+                            Label("Reprocess", systemImage: "arrow.clockwise.circle")
+                        }
+
                         Button(role: .destructive) {
                             coordinator.deleteMeetingSession(sessionId: session.id)
                         } label: {
@@ -34,7 +41,7 @@ struct MeetingHistoryView: View {
                 Button {
                     coordinator.fetchMeetingHistory()
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    Label("Reload", systemImage: "arrow.clockwise")
                 }
             }
         } detail: {

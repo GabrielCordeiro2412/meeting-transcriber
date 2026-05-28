@@ -53,6 +53,14 @@ struct MeetingDetailView: View {
                 }
                 .keyboardShortcut("s", modifiers: .command)
             } else {
+                if canRetryProcessing {
+                    Button {
+                        coordinator.retryProcessingSelectedSession()
+                    } label: {
+                        Label("Reprocess", systemImage: "arrow.clockwise.circle")
+                    }
+                }
+
                 Button {
                     isEditing = true
                 } label: {
@@ -181,6 +189,13 @@ struct MeetingDetailView: View {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
         return "\(minutes)m \(seconds)s"
+    }
+
+    private var canRetryProcessing: Bool {
+        session.status == .error
+            || session.status == .processingTranscript
+            || session.status == .generatingSummary
+            || session.audioChunks.contains { $0.uploadStatus == .uploaded }
     }
 }
 

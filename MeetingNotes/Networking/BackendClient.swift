@@ -1,217 +1,177 @@
 import Foundation
 
 protocol MeetingProcessingService: Sendable {
-    func sendMagicLink(email: String) async throws
-    func session(fromAuthCallbackURL url: URL) throws -> UserSession
-    func fetchCurrentUser(session: UserSession) async throws -> UserSession
-    func createMeeting(request: CreateMeetingPayload, userSession: UserSession) async throws
-    func uploadAudio(meetingID: UUID, source: RemoteUploadSource, fileURLs: [URL], userSession: UserSession) async throws
-    func processMeeting(meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession
-    func fetchMeetings(userSession: UserSession) async throws -> [RemoteMeetingSession]
-    func fetchMeeting(meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession
-    func updateMeeting(request: UpdateMeetingPayload, meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession
+    func transcribeAudio(fileURL: URL) async throws -> String
+    func summarizeTranscript(
+        _ transcript: String,
+        language preference: SummaryLanguagePreference
+    ) async throws -> MeetingSummaryResult
 }
 
-enum RemoteUploadSource: String {
-    case microphone
-    case system
-}
-
-enum BackendClientError: LocalizedError {
-    case invalidURL
+enum OpenAIClientError: LocalizedError {
+    case missingAPIKey
     case invalidResponse
-    case unauthorized
-    case authCallbackMissingTokens
     case message(String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL:
-            return "The backend URL is invalid."
+        case .missingAPIKey:
+            return "Add your OpenAI API key before processing meetings."
         case .invalidResponse:
-            return "The server returned an unexpected response."
-        case .unauthorized:
-            return "Your session expired. Sign in again to continue."
-        case .authCallbackMissingTokens:
-            return "The sign-in callback did not include a valid session."
+            return "OpenAI returned an unexpected response."
         case .message(let message):
             return message
         }
     }
 }
 
-final class BackendClient: @unchecked Sendable, MeetingProcessingService {
-    private let configuration: BackendConfiguration
+final class OpenAIClient: @unchecked Sendable, MeetingProcessingService {
+    private let apiKeyStore: APIKeyStore
     private let session: URLSession
     private let decoder: JSONDecoder
-    private let encoder: JSONEncoder
+
+    private let transcriptionModel = "gpt-4o-mini-transcribe"
+    private let summaryModel = "gpt-4.1-mini"
+    private let transcriptionPrompt = "Transcribe with clear punctuation. Preserve proper names, technical terms, decisions, next steps, and questions discussed in the meeting. Return only the spoken content in the language being spoken."
 
     init(
-        configuration: BackendConfiguration = .load(),
+        apiKeyStore: APIKeyStore = .shared,
         session: URLSession = .shared
     ) {
-        self.configuration = configuration
+        self.apiKeyStore = apiKeyStore
         self.session = session
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        self.encoder = encoder
     }
 
-    func sendMagicLink(email: String) async throws {
-        let payload = MagicLinkRequest(email: email, redirectURL: configuration.authRedirectURL)
-        let request = try makeRequest(path: "/auth/magic-link", method: "POST", body: payload)
-        let (_, response) = try await session.data(for: request)
-        try validate(response: response, data: nil)
-    }
+    func transcribeAudio(fileURL: URL) async throws -> String {
+        let apiKey = try requireAPIKey()
 
-    func fetchCurrentUser(session userSession: UserSession) async throws -> UserSession {
-        let request = try authorizedRequest(path: "/auth/me", userSession: userSession)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        let currentUser = try decoder.decode(CurrentUserResponse.self, from: data)
-        return UserSession(
-            userID: currentUser.userID,
-            email: currentUser.email,
-            accessToken: userSession.accessToken,
-            refreshToken: userSession.refreshToken,
-            expiresAt: userSession.expiresAt
-        )
-    }
-
-    func createMeeting(request payload: CreateMeetingPayload, userSession: UserSession) async throws {
-        let request = try authorizedRequest(path: "/meetings", method: "POST", body: payload, userSession: userSession)
-        let (data, response) = try await self.session.data(for: request)
-        try validate(response: response, data: data)
-    }
-
-    func uploadAudio(meetingID: UUID, source: RemoteUploadSource, fileURLs: [URL], userSession: UserSession) async throws {
-        guard !fileURLs.isEmpty else { return }
-
-        var request = try authorizedRequest(path: "/meetings/\(meetingID.uuidString)/upload?source=\(source.rawValue)", method: "POST", userSession: userSession)
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
+        let fileData = try Data(contentsOf: fileURL)
         var form = MultipartFormData(boundary: boundary)
-        for fileURL in fileURLs {
-            let data = try Data(contentsOf: fileURL)
-            form = form.appendFile(
-                name: "files",
-                filename: fileURL.lastPathComponent,
-                mimeType: mimeType(for: fileURL),
-                data: data
-            )
-        }
+        form = form.appendField(name: "model", value: transcriptionModel)
+        form = form.appendField(name: "response_format", value: "json")
+        form = form.appendField(name: "prompt", value: transcriptionPrompt)
+        form = form.appendFile(
+            name: "file",
+            filename: fileURL.lastPathComponent,
+            mimeType: mimeType(for: fileURL),
+            data: fileData
+        )
         request.httpBody = form.finalize()
 
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
+
+        let payload = try decoder.decode(TranscriptionResponse.self, from: data)
+        return cleanTranscript(payload.text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func processMeeting(meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession {
-        let request = try authorizedRequest(path: "/meetings/\(meetingID.uuidString)/process", method: "POST", userSession: userSession)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-        return try decoder.decode(RemoteMeetingSession.self, from: data)
-    }
+    func summarizeTranscript(
+        _ transcript: String,
+        language preference: SummaryLanguagePreference
+    ) async throws -> MeetingSummaryResult {
+        let apiKey = try requireAPIKey()
 
-    func fetchMeetings(userSession: UserSession) async throws -> [RemoteMeetingSession] {
-        let request = try authorizedRequest(path: "/meetings", userSession: userSession)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-        return try decoder.decode([RemoteMeetingSession].self, from: data)
-    }
-
-    func fetchMeeting(meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession {
-        let request = try authorizedRequest(path: "/meetings/\(meetingID.uuidString)", userSession: userSession)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-        return try decoder.decode(RemoteMeetingSession.self, from: data)
-    }
-
-    func updateMeeting(request payload: UpdateMeetingPayload, meetingID: UUID, userSession: UserSession) async throws -> RemoteMeetingSession {
-        let request = try authorizedRequest(path: "/meetings/\(meetingID.uuidString)", method: "PATCH", body: payload, userSession: userSession)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-        return try decoder.decode(RemoteMeetingSession.self, from: data)
-    }
-
-    func session(fromAuthCallbackURL url: URL) throws -> UserSession {
-        let parameters = url.queryParameters.merging(url.fragmentParameters) { current, _ in current }
-        guard let accessToken = parameters["access_token"],
-              let refreshToken = parameters["refresh_token"] else {
-            throw BackendClientError.authCallbackMissingTokens
-        }
-
-        let userID = parameters["user_id"] ?? parameters["sub"] ?? ""
-        let email = parameters["email"] ?? ""
-        let expiresIn = TimeInterval(parameters["expires_in"] ?? "") ?? 3600
-        return UserSession(
-            userID: userID,
-            email: email,
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            expiresAt: Date().addingTimeInterval(expiresIn)
-        )
-    }
-
-    private func makeRequest<T: Encodable>(path: String, method: String, body: T? = nil) throws -> URLRequest {
-        guard let url = URL(string: path, relativeTo: configuration.apiBaseURL) else {
-            throw BackendClientError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let body {
-            request.httpBody = try encoder.encode(body)
+        let languageInstruction = preference.languageInstruction()
+        let bodyObject: [String: Any] = [
+            "model": summaryModel,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": "You convert meeting transcripts into complete, practical meeting notes. \(languageInstruction) Be specific and preserve concrete details, decisions, tradeoffs, examples, numbers, blockers, and follow-up context. Return JSON that follows the provided schema exactly."
+                ],
+                [
+                    "role": "user",
+                    "content": transcript
+                ]
+            ],
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "meeting_summary",
+                    "strict": true,
+                    "schema": [
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": [
+                            "title": ["type": "string"],
+                            "summary": ["type": "string"],
+                            "detailedNotes": ["type": "array", "items": ["type": "string"]],
+                            "topics": ["type": "array", "items": ["type": "string"]],
+                            "keyPoints": ["type": "array", "items": ["type": "string"]],
+                            "decisions": ["type": "array", "items": ["type": "string"]],
+                            "actionItems": ["type": "array", "items": ["type": "string"]],
+                            "openQuestions": ["type": "array", "items": ["type": "string"]],
+                            "risksOrBlockers": ["type": "array", "items": ["type": "string"]],
+                            "followUpItems": ["type": "array", "items": ["type": "string"]],
+                        ],
+                        "required": [
+                            "title",
+                            "summary",
+                            "detailedNotes",
+                            "topics",
+                            "keyPoints",
+                            "decisions",
+                            "actionItems",
+                            "openQuestions",
+                            "risksOrBlockers",
+                            "followUpItems",
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyObject)
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+
+        let payload = try decoder.decode(ChatCompletionResponse.self, from: data)
+        guard let content = payload.choices.first?.message.content,
+              let contentData = content.data(using: .utf8) else {
+            throw OpenAIClientError.invalidResponse
         }
 
-        return request
+        return try decoder.decode(MeetingSummaryResult.self, from: contentData)
     }
 
-    private func authorizedRequest<T: Encodable>(
-        path: String,
-        method: String = "GET",
-        body: T? = nil,
-        userSession: UserSession
-    ) throws -> URLRequest {
-        var request = try makeRequest(path: path, method: method, body: body)
-        request.setValue("Bearer \(userSession.accessToken)", forHTTPHeaderField: "Authorization")
-        return request
+    private func requireAPIKey() throws -> String {
+        guard let apiKey = apiKeyStore.currentAPIKey(),
+              APIKeyStore.isValidFormat(apiKey) else {
+            throw OpenAIClientError.missingAPIKey
+        }
+        return apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func authorizedRequest(
-        path: String,
-        method: String = "GET",
-        userSession: UserSession
-    ) throws -> URLRequest {
-        var request = try makeRequest(path: path, method: method, body: Optional<String>.none)
-        request.setValue("Bearer \(userSession.accessToken)", forHTTPHeaderField: "Authorization")
-        return request
-    }
-
-    private func validate(response: URLResponse, data: Data?) throws {
+    private func validate(response: URLResponse, data: Data) throws {
         guard let response = response as? HTTPURLResponse else {
-            throw BackendClientError.invalidResponse
-        }
-
-        if response.statusCode == 401 {
-            throw BackendClientError.unauthorized
+            throw OpenAIClientError.invalidResponse
         }
 
         guard (200..<300).contains(response.statusCode) else {
-            if let data,
-               let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
-                throw BackendClientError.message(errorResponse.error)
+            if let payload = try? decoder.decode(OpenAIErrorEnvelope.self, from: data) {
+                let code = payload.error.code.map { " (\($0))" } ?? ""
+                let requestID = response.value(forHTTPHeaderField: "x-request-id").map { " [request_id=\($0)]" } ?? ""
+                throw OpenAIClientError.message("\(response.statusCode)\(code): \(payload.error.message)\(requestID)")
             }
-            throw BackendClientError.invalidResponse
+
+            throw OpenAIClientError.invalidResponse
         }
     }
 
@@ -229,45 +189,39 @@ final class BackendClient: @unchecked Sendable, MeetingProcessingService {
             return "application/octet-stream"
         }
     }
-}
 
-private struct MagicLinkRequest: Encodable {
-    let email: String
-    let redirectURL: String
-
-    enum CodingKeys: String, CodingKey {
-        case email
-        case redirectURL = "redirectUrl"
+    private func cleanTranscript(_ transcript: String) -> String {
+        transcript
+            .replacingOccurrences(of: #"context:\s*#{3}[\s\S]*?#{3}"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"Transcribe in Brazilian Portuguese with clear punctuation\.[^\n]*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"Transcreva em português brasileiro com pontuação clara\.[^\n]*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
-struct CreateMeetingPayload: Encodable, Sendable {
-    let id: UUID
-    let title: String
-    let startedAt: Date?
-    let endedAt: Date?
-    let captureMode: CaptureMode
+private struct TranscriptionResponse: Decodable {
+    let text: String
 }
 
-struct UpdateMeetingPayload: Encodable, Sendable {
-    let title: String
-    let summaryText: String
-    let transcriptText: String
-    let summaryPayload: MeetingSummaryResult
-}
+private struct ChatCompletionResponse: Decodable {
+    struct Choice: Decodable {
+        struct Message: Decodable {
+            let content: String
+        }
 
-private struct CurrentUserResponse: Decodable {
-    let userID: String
-    let email: String
-
-    enum CodingKeys: String, CodingKey {
-        case userID = "userId"
-        case email
+        let message: Message
     }
+
+    let choices: [Choice]
 }
 
-private struct APIErrorResponse: Decodable {
-    let error: String
+private struct OpenAIErrorEnvelope: Decodable {
+    struct OpenAIError: Decodable {
+        let message: String
+        let code: String?
+    }
+
+    let error: OpenAIError
 }
 
 private struct MultipartFormData {
@@ -288,36 +242,17 @@ private struct MultipartFormData {
         return copy
     }
 
+    func appendField(name: String, value: String) -> MultipartFormData {
+        var copy = self
+        copy.body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        copy.body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+        copy.body.append("\(value)\r\n".data(using: .utf8)!)
+        return copy
+    }
+
     func finalize() -> Data {
         var copy = body
         copy.append("--\(boundary)--\r\n".data(using: .utf8)!)
         return copy
-    }
-}
-
-private extension URL {
-    var queryParameters: [String: String] {
-        guard let components = URLComponents(url: self, resolvingAgainstBaseURL: false),
-              let items = components.queryItems else {
-            return [:]
-        }
-
-        return items.reduce(into: [:]) { partialResult, item in
-            if let value = item.value {
-                partialResult[item.name] = value
-            }
-        }
-    }
-
-    var fragmentParameters: [String: String] {
-        guard let fragment, !fragment.isEmpty else { return [:] }
-        let cleaned = fragment.replacingOccurrences(of: "#", with: "")
-        return cleaned
-            .split(separator: "&")
-            .reduce(into: [:]) { partialResult, pair in
-                let components = pair.split(separator: "=", maxSplits: 1).map(String.init)
-                guard components.count == 2 else { return }
-                partialResult[components[0]] = components[1].removingPercentEncoding ?? components[1]
-            }
     }
 }

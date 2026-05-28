@@ -8,7 +8,7 @@ final class MeetingCoordinator: ObservableObject {
     @Published var recordingState: RecordingState = .idle {
         didSet { syncFloatingWidgetLayout() }
     }
-    @Published var statusMessage = "Sign in to start recording"
+    @Published var statusMessage = "Add your OpenAI API key to start recording"
     @Published var sessions: [MeetingSession] = []
     @Published var selectedSession: MeetingSession?
     @Published var isFloatingWidgetVisible = false
@@ -16,13 +16,14 @@ final class MeetingCoordinator: ObservableObject {
     @Published var accumulatedRecordingDuration: TimeInterval = 0
     @Published var inputLevel: Float = 0
     @Published var completionMessage: String?
-    @Published var userSession: UserSession?
-    @Published var isAuthenticating = false
+    @Published var menuBarScreen: MenuBarScreen = .main
+    @Published var summaryLanguagePreference: SummaryLanguagePreference
 
     private let store: MeetingSessionStore
     private var captureManager: AudioCaptureManaging
     private let meetingService: MeetingProcessingService
-    private let sessionStore: SessionStore
+    private let apiKeyStore: APIKeyStore
+    private let summaryLanguageStore: SummaryLanguageStore
     private let floatingWidgetController = FloatingWidgetController()
     private let historyWindowController = HistoryWindowController()
     private var activeSessionID: UUID?
@@ -30,17 +31,21 @@ final class MeetingCoordinator: ObservableObject {
     private var systemSegmentPaths: [String] = []
     private var currentSegmentIndex = 0
     private let emptyAppAudioWarning = "App audio transcription failed: The transcript is empty."
+    private let chunkProcessor = AudioChunkProcessor.shared
 
     init(
         store: MeetingSessionStore,
         captureManager: AudioCaptureManaging = CompositeAudioCaptureManager(),
-        meetingService: MeetingProcessingService = BackendClient(),
-        sessionStore: SessionStore = .shared
+        meetingService: MeetingProcessingService = OpenAIClient(),
+        apiKeyStore: APIKeyStore = .shared,
+        summaryLanguageStore: SummaryLanguageStore = .shared
     ) {
         self.store = store
         self.captureManager = captureManager
         self.meetingService = meetingService
-        self.sessionStore = sessionStore
+        self.apiKeyStore = apiKeyStore
+        self.summaryLanguageStore = summaryLanguageStore
+        self.summaryLanguagePreference = summaryLanguageStore.current()
         self.captureManager.inputLevelHandler = { [weak self] level in
             Task { @MainActor in
                 self?.inputLevel = level
@@ -48,35 +53,43 @@ final class MeetingCoordinator: ObservableObject {
         }
 
         loadLocalHistory()
-        restoreSession()
+        normalizeInterruptedSessions()
+        updateReadyStatus()
     }
 
-    var isAuthenticated: Bool {
-        userSession != nil
+    var hasAPIKey: Bool {
+        guard let apiKey = apiKeyStore.currentAPIKey() else {
+            return false
+        }
+        return APIKeyStore.isValidFormat(apiKey)
+    }
+
+    var currentAPIKey: String {
+        apiKeyStore.currentAPIKey() ?? ""
     }
 
     var canStartRecording: Bool {
-        isAuthenticated && (recordingState == .idle || recordingState == .completed || recordingState == .error)
+        hasAPIKey && (recordingState == .idle || recordingState == .completed || recordingState == .error)
     }
 
     var canStopRecording: Bool {
-        isAuthenticated && recordingState == .recording
+        recordingState == .recording
     }
 
     var canPauseRecording: Bool {
-        isAuthenticated && recordingState == .recording
+        recordingState == .recording
     }
 
     var canResumeRecording: Bool {
-        isAuthenticated && recordingState == .paused
+        recordingState == .paused
     }
 
     var canFinishRecording: Bool {
-        isAuthenticated && (recordingState == .recording || recordingState == .paused)
+        hasAPIKey && (recordingState == .recording || recordingState == .paused)
     }
 
     var canDiscardRecording: Bool {
-        isAuthenticated && (recordingState == .recording || recordingState == .paused || recordingState == .requestingPermissions)
+        recordingState == .recording || recordingState == .paused || recordingState == .requestingPermissions
     }
 
     var latestSession: MeetingSession? {
@@ -88,8 +101,8 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     var statusAccentLabel: String {
-        if !isAuthenticated {
-            return "Sign In"
+        if !hasAPIKey {
+            return "Set API Key"
         }
 
         switch recordingState {
@@ -102,7 +115,7 @@ final class MeetingCoordinator: ObservableObject {
         case .paused:
             return "Paused"
         case .processingTranscript:
-            return "Uploading"
+            return "Transcribing"
         case .generatingSummary:
             return "Writing Notes"
         case .completed:
@@ -131,56 +144,58 @@ final class MeetingCoordinator: ObservableObject {
         28
     }
 
-    func sendMagicLink(email: String) async {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty else { return }
+    func showAPIKeySettings() {
+        menuBarScreen = .apiKey
+    }
 
-        isAuthenticating = true
-        statusMessage = "Sending magic link to \(trimmedEmail)"
+    func dismissAPIKeySettings() {
+        menuBarScreen = .main
+    }
 
+    func showSummaryLanguageSettings() {
+        menuBarScreen = .summaryLanguage
+    }
+
+    func dismissSummaryLanguageSettings() {
+        menuBarScreen = .main
+    }
+
+    func setSummaryLanguagePreference(_ preference: SummaryLanguagePreference) {
+        summaryLanguagePreference = preference
+        summaryLanguageStore.save(preference)
+    }
+
+    func saveAPIKey(_ apiKey: String) {
         do {
-            try await meetingService.sendMagicLink(email: trimmedEmail)
-            statusMessage = "Magic link sent. Open the email on this Mac to finish sign in."
+            try apiKeyStore.save(apiKey)
+            updateReadyStatus(message: "OpenAI API key saved.")
+            objectWillChange.send()
         } catch {
             statusMessage = error.localizedDescription
         }
-
-        isAuthenticating = false
     }
 
-    func handleAuthenticationCallback(url: URL) async {
-        isAuthenticating = true
-        statusMessage = "Completing sign in"
-
-        do {
-            let callbackSession = try meetingService.session(fromAuthCallbackURL: url)
-            let validatedSession = try await meetingService.fetchCurrentUser(session: callbackSession)
-            try sessionStore.save(validatedSession)
-            userSession = validatedSession
-            statusMessage = "Signed in as \(validatedSession.email)"
-            await refreshRemoteHistory()
-        } catch {
-            userSession = nil
-            statusMessage = error.localizedDescription
-        }
-
-        isAuthenticating = false
-    }
-
-    func signOut() {
-        try? sessionStore.clear()
-        userSession = nil
+    func clearAPIKey() {
+        apiKeyStore.clear()
         completionMessage = nil
-        if isFloatingWidgetVisible {
-            floatingWidgetController.hide()
-            isFloatingWidgetVisible = false
+        if recordingState != .recording && recordingState != .paused && recordingState != .processingTranscript && recordingState != .generatingSummary {
+            recordingState = .idle
         }
-        resetForNextRecording()
-        statusMessage = "Signed out. Sign in to continue."
+        statusMessage = "OpenAI API key removed. Add a new key to process meetings."
+        objectWillChange.send()
     }
 
     func startRecording() async {
-        guard canStartRecording else { return }
+        guard hasAPIKey else {
+            statusMessage = "Add a valid OpenAI API key before recording."
+            showAPIKeySettings()
+            return
+        }
+
+        guard canStartRecording else {
+            updateReadyStatus()
+            return
+        }
         completionMessage = nil
 
         do {
@@ -191,6 +206,7 @@ final class MeetingCoordinator: ObservableObject {
             session.startedAt = Date()
             session.status = .requestingPermissions
             session.syncState = .localOnly
+            session.processingError = nil
             try store.save()
             activeSessionID = session.id
             selectedSession = session
@@ -260,7 +276,6 @@ final class MeetingCoordinator: ObservableObject {
             if let session = selectedSession {
                 session.status = .error
                 session.processingError = error.localizedDescription
-                session.syncState = .syncFailed
                 try? store.save()
             }
             loadLocalHistory()
@@ -299,7 +314,6 @@ final class MeetingCoordinator: ObservableObject {
             if let session = selectedSession {
                 session.status = .error
                 session.processingError = error.localizedDescription
-                session.syncState = .syncFailed
                 try? store.save()
             }
             loadLocalHistory()
@@ -307,7 +321,16 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     func finishRecording() async {
-        guard canFinishRecording, let activeSessionID, let userSession else { return }
+        guard hasAPIKey else {
+            statusMessage = "Add a valid OpenAI API key before transcribing."
+            showAPIKeySettings()
+            return
+        }
+
+        guard canFinishRecording, let activeSessionID else {
+            updateReadyStatus()
+            return
+        }
         completionMessage = nil
 
         do {
@@ -330,11 +353,6 @@ final class MeetingCoordinator: ObservableObject {
                 selectedSession = session
             }
 
-            recordingState = .processingTranscript
-            statusMessage = "Uploading recording"
-            recordingStartedAt = nil
-            inputLevel = 0
-
             guard let session = try store.session(id: activeSessionID) else {
                 throw AIProcessingError.invalidResponse
             }
@@ -342,47 +360,14 @@ final class MeetingCoordinator: ObservableObject {
             session.endedAt = Date()
             session.audioFileURL = joinedPaths(microphoneSegmentPaths)
             session.systemAudioFileURL = joinedPaths(systemSegmentPaths)
-            session.status = .processingTranscript
-            session.syncState = .localOnly
             try store.save()
             selectedSession = session
 
-            let createPayload = CreateMeetingPayload(
-                id: session.id,
-                title: session.title,
-                startedAt: session.startedAt,
-                endedAt: session.endedAt,
-                captureMode: session.captureMode
-            )
-            try await meetingService.createMeeting(request: createPayload, userSession: userSession)
-            try await uploadSessionAudio(session, userSession: userSession)
-
-            statusMessage = "Generating transcript and summary"
-            let remoteSession = try await meetingService.processMeeting(meetingID: session.id, userSession: userSession)
-
-            session.apply(remote: remoteSession)
-            session.syncState = .synced
-            try store.save()
-
-            selectedSession = session
-            postCompletionNotification(for: session)
-            completionMessage = "Summary ready: \(session.title)"
-            resetForNextRecording()
-            statusMessage = "Summary ready to review"
-            await refreshRemoteHistory()
-        } catch BackendClientError.unauthorized {
-            if let session = try? store.session(id: activeSessionID) {
-                session.status = .error
-                session.processingError = BackendClientError.unauthorized.localizedDescription
-                session.syncState = .syncFailed
-                try? store.save()
-            }
-            signOut()
+            try await processSession(session)
         } catch {
             if let session = try? store.session(id: activeSessionID) {
                 session.status = .error
                 session.processingError = error.localizedDescription
-                session.syncState = .syncFailed
                 try? store.save()
                 selectedSession = session
             }
@@ -408,6 +393,7 @@ final class MeetingCoordinator: ObservableObject {
             if let sessionID, let session = try? store.session(id: sessionID) {
                 pathsToDelete.append(contentsOf: storedPaths(from: session.audioFileURL))
                 pathsToDelete.append(contentsOf: storedPaths(from: session.systemAudioFileURL))
+                pathsToDelete.append(contentsOf: session.audioChunks.compactMap { $0.compressedFileURL ?? $0.localFileURL })
                 try? store.deleteMeetingSession(sessionId: sessionID)
             }
 
@@ -419,13 +405,29 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     func fetchMeetingHistory() {
-        Task { await refreshRemoteHistory() }
+        loadLocalHistory()
+    }
+
+    func retryProcessingSelectedSession() {
+        guard hasAPIKey else {
+            statusMessage = "Add a valid OpenAI API key before reprocessing."
+            showAPIKeySettings()
+            return
+        }
+        guard let session = selectedSession else { return }
+        Task {
+            await reprocess(session: session)
+        }
+    }
+
+    func retryUploadSelectedSession() {
+        retryProcessingSelectedSession()
     }
 
     func resetCompletionState() {
         completionMessage = nil
-        statusMessage = isAuthenticated ? "Ready to record" : "Sign in to start recording"
         recordingState = .idle
+        updateReadyStatus()
         syncFloatingWidgetLayout()
     }
 
@@ -463,36 +465,6 @@ final class MeetingCoordinator: ObservableObject {
             selectedSession = session
             statusMessage = "Meeting notes saved"
             loadLocalHistory()
-
-            if session.syncState == .synced, let userSession {
-                let payload = UpdateMeetingPayload(
-                    title: session.title,
-                    summaryText: session.summaryText,
-                    transcriptText: session.transcriptText,
-                    summaryPayload: MeetingSummaryResult(
-                        title: session.title,
-                        summary: session.summaryText,
-                        detailedNotes: session.detailedNotes ?? [],
-                        topics: session.topics ?? [],
-                        keyPoints: session.keyPoints,
-                        decisions: session.decisions,
-                        actionItems: session.actionItems,
-                        openQuestions: session.openQuestions,
-                        risksOrBlockers: session.risksOrBlockers ?? [],
-                        followUpItems: session.followUpItems ?? []
-                    )
-                )
-                Task {
-                    do {
-                        _ = try await meetingService.updateMeeting(request: payload, meetingID: session.id, userSession: userSession)
-                        await refreshRemoteHistory()
-                    } catch {
-                        await MainActor.run {
-                            self.statusMessage = error.localizedDescription
-                        }
-                    }
-                }
-            }
         } catch {
             recordingState = .error
             statusMessage = error.localizedDescription
@@ -501,6 +473,13 @@ final class MeetingCoordinator: ObservableObject {
 
     func deleteMeetingSession(sessionId: UUID) {
         do {
+            if let session = try store.session(id: sessionId) {
+                let paths = storedPaths(from: session.audioFileURL)
+                    + storedPaths(from: session.systemAudioFileURL)
+                    + session.audioChunks.compactMap { $0.compressedFileURL ?? $0.localFileURL }
+                deleteFiles(at: paths)
+            }
+
             try store.deleteMeetingSession(sessionId: sessionId)
             if selectedSession?.id == sessionId {
                 selectedSession = nil
@@ -517,11 +496,6 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     func toggleFloatingWidget() {
-        guard isAuthenticated else {
-            statusMessage = "Sign in before opening the recorder widget."
-            return
-        }
-
         if isFloatingWidgetVisible {
             floatingWidgetController.hide()
             isFloatingWidgetVisible = false
@@ -554,46 +528,6 @@ final class MeetingCoordinator: ObservableObject {
         NSApp.terminate(nil)
     }
 
-    private func restoreSession() {
-        userSession = sessionStore.currentSession()
-        if let session = userSession, !session.isExpired {
-            statusMessage = "Restoring session"
-            Task { await validateStoredSession() }
-        } else {
-            statusMessage = "Sign in to start recording"
-        }
-    }
-
-    private func validateStoredSession() async {
-        guard let existingSession = userSession else { return }
-        do {
-            let validated = try await meetingService.fetchCurrentUser(session: existingSession)
-            try sessionStore.save(validated)
-            userSession = validated
-            statusMessage = "Signed in as \(validated.email)"
-            await refreshRemoteHistory()
-        } catch {
-            signOut()
-        }
-    }
-
-    private func refreshRemoteHistory() async {
-        loadLocalHistory()
-        guard let userSession else { return }
-        do {
-            let remoteSessions = try await meetingService.fetchMeetings(userSession: userSession)
-            try store.upsertRemoteSessions(remoteSessions)
-            loadLocalHistory()
-            if statusMessage == "Restoring session" || statusMessage == "Signed in to start recording" {
-                statusMessage = "Signed in as \(userSession.email)"
-            }
-        } catch BackendClientError.unauthorized {
-            signOut()
-        } catch {
-            statusMessage = error.localizedDescription
-        }
-    }
-
     private func loadLocalHistory() {
         do {
             sessions = try store.fetchMeetingHistory()
@@ -615,16 +549,188 @@ final class MeetingCoordinator: ObservableObject {
         }
     }
 
-    private func uploadSessionAudio(_ session: MeetingSession, userSession: UserSession) async throws {
-        let microphoneURLs = storedPaths(from: session.audioFileURL).map(fileURL(from:))
-        let systemURLs = storedPaths(from: session.systemAudioFileURL).map(fileURL(from:))
+    private func normalizeInterruptedSessions() {
+        do {
+            let history = try store.fetchMeetingHistory()
+            var didChange = false
+            for session in history where [.recording, .paused, .processingTranscript, .generatingSummary, .requestingPermissions].contains(session.status) {
+                session.status = .error
+                if session.processingError == nil || session.processingError?.isEmpty == true {
+                    session.processingError = "Processing was interrupted. Reprocess this meeting to continue."
+                }
+                didChange = true
+            }
 
-        if !microphoneURLs.isEmpty {
-            try await meetingService.uploadAudio(meetingID: session.id, source: .microphone, fileURLs: microphoneURLs, userSession: userSession)
+            if didChange {
+                try store.save()
+                loadLocalHistory()
+            }
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func processSession(_ session: MeetingSession) async throws {
+        guard hasAPIKey else {
+            throw OpenAIClientError.missingAPIKey
         }
 
-        if !systemURLs.isEmpty {
-            try await meetingService.uploadAudio(meetingID: session.id, source: .system, fileURLs: systemURLs, userSession: userSession)
+        recordingState = .processingTranscript
+        statusMessage = "Preparing audio"
+        recordingStartedAt = nil
+        inputLevel = 0
+
+        let chunks = try await ensurePreparedChunks(for: session)
+        session.audioChunks = chunks.map(\.chunk)
+        session.status = .processingTranscript
+        session.processingError = nil
+        try store.save()
+
+        var transcriptParts: [TranscriptPart] = []
+        var hadEmptyChunks = false
+
+        for (index, preparedChunk) in chunks.enumerated() {
+            statusMessage = "Transcribing \(index + 1)/\(chunks.count)"
+            var localChunk = preparedChunk.chunk
+            localChunk.processingError = nil
+            updateLocalChunk(localChunk, in: session)
+            try store.save()
+
+            let transcript = try await meetingService.transcribeAudio(fileURL: preparedChunk.uploadFileURL)
+            let normalized = cleanedTranscript(transcript)
+
+            if normalized.isEmpty {
+                localChunk.transcriptionStatus = .empty
+                localChunk.transcriptText = ""
+                hadEmptyChunks = true
+            } else {
+                localChunk.transcriptionStatus = .completed
+                localChunk.transcriptText = normalized
+                transcriptParts.append(
+                    TranscriptPart(
+                        source: localChunk.source,
+                        sequenceIndex: localChunk.sequenceIndex,
+                        text: normalized
+                    )
+                )
+            }
+
+            updateLocalChunk(localChunk, in: session)
+            try store.save()
+        }
+
+        let transcript = consolidateTranscript(transcriptParts)
+        guard !transcript.isEmpty else {
+            throw AIProcessingError.emptyTranscript
+        }
+
+        session.transcriptText = transcript
+        session.status = .generatingSummary
+        session.processingError = hadEmptyChunks ? "One or more chunks did not produce transcript text." : nil
+        try store.save()
+
+        recordingState = .generatingSummary
+        statusMessage = "Generating summary (\(summaryLanguagePreference.shortLabel))"
+
+        session.summaryLanguageRawValue = summaryLanguagePreference.rawValue
+        try store.save()
+
+        let summary = try await meetingService.summarizeTranscript(
+            transcript,
+            language: summaryLanguagePreference
+        )
+        session.apply(summary: summary)
+        session.status = .completed
+        try store.save()
+
+        selectedSession = session
+        postCompletionNotification(for: session)
+        completionMessage = "Summary ready: \(session.title)"
+        resetForNextRecording()
+        statusMessage = "Summary ready to review"
+        loadLocalHistory()
+    }
+
+    private func ensurePreparedChunks(for session: MeetingSession) async throws -> [PreparedAudioChunk] {
+        let existing = session.audioChunks
+        if !existing.isEmpty {
+            let prepared = existing.compactMap { chunk -> PreparedAudioChunk? in
+                guard let uploadPath = chunk.compressedFileURL ?? chunk.localFileURL else { return nil }
+                let uploadURL = fileURL(from: uploadPath)
+                guard isUsableAudioFile(uploadURL) else { return nil }
+                return PreparedAudioChunk(chunk: chunk, uploadFileURL: uploadURL)
+            }
+
+            if prepared.count == existing.count {
+                return prepared
+            }
+
+            session.audioChunks = []
+            try store.save()
+        }
+
+        let recoveredRecordingPaths = recoveredRecordingPaths(for: session)
+        let microphonePaths = storedPaths(from: session.audioFileURL).ifEmpty(use: recoveredRecordingPaths.microphone)
+        let systemPaths = storedPaths(from: session.systemAudioFileURL).ifEmpty(use: recoveredRecordingPaths.system)
+
+        if session.audioFileURL == nil, !microphonePaths.isEmpty {
+            session.audioFileURL = joinedPaths(microphonePaths)
+        }
+
+        if session.systemAudioFileURL == nil, !systemPaths.isEmpty {
+            session.systemAudioFileURL = joinedPaths(systemPaths)
+        }
+
+        let microphoneURLs = microphonePaths.map(fileURL(from:))
+        let systemURLs = systemPaths.map(fileURL(from:))
+
+        let microphoneChunks = try await chunkProcessor.prepareChunks(
+            meetingID: session.id,
+            source: .microphone,
+            sourceURLs: microphoneURLs
+        )
+        let systemChunks = try await chunkProcessor.prepareChunks(
+            meetingID: session.id,
+            source: .system,
+            sourceURLs: systemURLs
+        )
+
+        let prepared = microphoneChunks + systemChunks
+        session.audioChunks = prepared.map(\.chunk)
+        try store.save()
+        return prepared
+    }
+
+    private func isUsableAudioFile(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let size = (try? url.resourceValues(forKeys: Set([URLResourceKey.fileSizeKey])).fileSize) ?? 0
+        return size > 44
+    }
+
+    private func updateLocalChunk(_ chunk: MeetingAudioChunk, in session: MeetingSession) {
+        var chunks = session.audioChunks
+        if let index = chunks.firstIndex(where: { $0.id == chunk.id }) {
+            chunks[index] = chunk
+        } else {
+            chunks.append(chunk)
+        }
+        session.audioChunks = chunks.sorted {
+            if $0.source == $1.source {
+                return $0.sequenceIndex < $1.sequenceIndex
+            }
+            return $0.source.rawValue < $1.source.rawValue
+        }
+    }
+
+    private func reprocess(session: MeetingSession) async {
+        do {
+            try await processSession(session)
+        } catch {
+            session.status = .error
+            session.processingError = error.localizedDescription
+            try? store.save()
+            loadLocalHistory()
+            statusMessage = error.localizedDescription
         }
     }
 
@@ -685,8 +791,19 @@ final class MeetingCoordinator: ObservableObject {
         inputLevel = 0
         recordingState = .idle
         if completionMessage == nil {
-            statusMessage = isAuthenticated ? "Ready to record" : "Sign in to start recording"
+            updateReadyStatus()
         }
+    }
+
+    private func updateReadyStatus(message: String? = nil) {
+        if let message {
+            statusMessage = message
+            return
+        }
+
+        statusMessage = hasAPIKey
+            ? "Ready to record"
+            : "Add your OpenAI API key to start recording"
     }
 
     private func syncFloatingWidgetLayout() {
@@ -698,6 +815,46 @@ final class MeetingCoordinator: ObservableObject {
         for path in Set(paths) where !path.isEmpty {
             try? FileManager.default.removeItem(at: fileURL(from: path))
         }
+    }
+
+    private func recoveredRecordingPaths(for session: MeetingSession) -> (microphone: [String], system: [String]) {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = base.appending(path: "MeetingNotes/Recordings", directoryHint: .isDirectory)
+        guard let fileURLs = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return ([], [])
+        }
+
+        let sessionPrefix = "\(session.id.uuidString.uppercased())-segment-"
+        let matching = fileURLs.filter {
+            $0.lastPathComponent.uppercased().hasPrefix(sessionPrefix)
+        }
+
+        let microphone = matching
+            .filter { $0.lastPathComponent.contains("-microphone.") }
+            .sorted(by: compareRecordingURL)
+            .map(\.path)
+
+        let system = matching
+            .filter { $0.lastPathComponent.contains("-system.") }
+            .sorted(by: compareRecordingURL)
+            .map(\.path)
+
+        return (microphone, system)
+    }
+
+    private func compareRecordingURL(_ lhs: URL, _ rhs: URL) -> Bool {
+        segmentIndex(from: lhs) < segmentIndex(from: rhs)
+    }
+
+    private func segmentIndex(from url: URL) -> Int {
+        let filename = url.deletingPathExtension().lastPathComponent
+        guard let range = filename.range(of: "-segment-") else { return 0 }
+        let suffix = filename[range.upperBound...]
+        let number = suffix.split(separator: "-").first.flatMap { Int($0) }
+        return number ?? 0
     }
 
     private func removeBenignAppAudioWarnings(from sessions: [MeetingSession]) -> Bool {
@@ -748,6 +905,34 @@ final class MeetingCoordinator: ObservableObject {
             .joined(separator: "\n\n")
     }
 
+    private func consolidateTranscript(_ parts: [TranscriptPart]) -> String {
+        let normalized = parts
+            .map { part in
+                TranscriptPart(
+                    source: part.source,
+                    sequenceIndex: part.sequenceIndex,
+                    text: cleanedTranscript(part.text)
+                )
+            }
+            .filter { !$0.text.isEmpty }
+            .sorted {
+                if $0.source == $1.source {
+                    return $0.sequenceIndex < $1.sequenceIndex
+                }
+                return $0.source.rawValue < $1.source.rawValue
+            }
+
+        var deduplicated: [TranscriptPart] = []
+        for part in normalized {
+            if deduplicated.last?.text == part.text {
+                continue
+            }
+            deduplicated.append(part)
+        }
+
+        return deduplicated.map(\.text).joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func postCompletionNotification(for session: MeetingSession) {
         let content = UNMutableNotificationContent()
         content.title = "Meeting notes ready"
@@ -763,6 +948,24 @@ final class MeetingCoordinator: ObservableObject {
         )
 
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+enum MenuBarScreen {
+    case main
+    case apiKey
+    case summaryLanguage
+}
+
+private struct TranscriptPart {
+    let source: MeetingAudioChunk.Source
+    let sequenceIndex: Int
+    let text: String
+}
+
+private extension Array {
+    func ifEmpty(use fallback: [Element]) -> [Element] {
+        isEmpty ? fallback : self
     }
 }
 
@@ -803,7 +1006,3 @@ private final class HistoryWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-enum MeetingNotificationManager {
-    static let categoryIdentifier = "MEETING_SUMMARY_READY"
-    static let openActionIdentifier = "OPEN_SUMMARY"
-}

@@ -9,15 +9,17 @@ struct MenuBarContentView: View {
 
             ScrollView(.vertical, showsIndicators: true) {
                 GlassPanel(cornerRadius: 30) {
-                    if coordinator.isAuthenticated {
-                        VStack(alignment: .leading, spacing: 16) {
-                            hero
-                            metrics
-                            actions
-                            utilityRow
-                        }
-                    } else {
-                        AuthAccessView()
+                    switch coordinator.menuBarScreen {
+                    case .main:
+                        mainContent
+                    case .apiKey:
+                        APIKeySettingsView(onBack: {
+                            coordinator.dismissAPIKeySettings()
+                        })
+                    case .summaryLanguage:
+                        SummaryLanguageSettingsView(onBack: {
+                            coordinator.dismissSummaryLanguageSettings()
+                        })
                     }
                 }
                 .padding(.horizontal, 14)
@@ -26,6 +28,22 @@ struct MenuBarContentView: View {
         }
         .frame(width: 380)
         .frame(minHeight: 430, maxHeight: 520)
+    }
+
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            hero
+
+            if !coordinator.hasAPIKey {
+                APIKeySetupCard {
+                    coordinator.showAPIKeySettings()
+                }
+            }
+
+            metrics
+            actions
+            utilityRow
+        }
     }
 
     private var hero: some View {
@@ -97,9 +115,16 @@ struct MenuBarContentView: View {
             )
 
             MetricPill(
-                title: "Account",
-                value: coordinator.userSession?.email ?? "Signed out",
-                systemImage: "person.crop.circle",
+                title: "OpenAI",
+                value: coordinator.hasAPIKey ? "API key configured" : "API key missing",
+                systemImage: "key.fill",
+                multilineValue: true
+            )
+
+            MetricPill(
+                title: "Summary language",
+                value: coordinator.summaryLanguagePreference.title,
+                systemImage: "globe",
                 multilineValue: true
             )
         }
@@ -120,14 +145,16 @@ struct MenuBarContentView: View {
                 .help(coordinator.canFinishRecording ? "Finish and transcribe this recording" : "Record or resume audio before finishing")
             }
 
-            Button {
-                Task { await coordinator.discardRecording() }
-            } label: {
-                Label("Stop & Discard", systemImage: "xmark.circle.fill")
+            if coordinator.canDiscardRecording {
+                Button {
+                    Task { await coordinator.discardRecording() }
+                } label: {
+                    Label("Stop & Discard", systemImage: "xmark.circle.fill")
+                }
+                .buttonStyle(SecondaryGlassButtonStyle())
+                .disabled(!coordinator.canDiscardRecording)
+                .help(coordinator.canDiscardRecording ? "Stop and discard the current recording" : "No active or paused recording to discard")
             }
-            .buttonStyle(SecondaryGlassButtonStyle())
-            .disabled(!coordinator.canDiscardRecording)
-            .help(coordinator.canDiscardRecording ? "Stop and discard the current recording" : "No active or paused recording to discard")
 
             HStack(spacing: 10) {
                 Button {
@@ -166,9 +193,16 @@ struct MenuBarContentView: View {
             }
 
             Button {
-                coordinator.signOut()
+                coordinator.showAPIKeySettings()
             } label: {
-                Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                Label("OpenAI API Key", systemImage: "key.fill")
+            }
+            .buttonStyle(SecondaryGlassButtonStyle())
+
+            Button {
+                coordinator.showSummaryLanguageSettings()
+            } label: {
+                Label("Summary Language", systemImage: "globe")
             }
             .buttonStyle(SecondaryGlassButtonStyle())
 
@@ -208,7 +242,7 @@ struct MenuBarContentView: View {
             }
             .buttonStyle(PrimaryGlassButtonStyle(tint: coordinator.recordingState.tint))
             .disabled(!coordinator.canStartRecording)
-            .help(coordinator.canStartRecording ? "Start a new recording" : "Recording controls are temporarily unavailable")
+            .help(coordinator.canStartRecording ? "Start a new recording" : "Configure your OpenAI API key before recording")
         }
     }
 }

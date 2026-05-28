@@ -12,17 +12,6 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>com.local.MeetingNotes.auth</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>meetingnotes</string>
-			</array>
-		</dict>
-	</array>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -33,10 +22,6 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>MeetingNotesAPIBaseURL</key>
-	<string>http://127.0.0.1:8787</string>
-	<key>MeetingNotesAuthRedirectURL</key>
-	<string>meetingnotes://auth/callback</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Meeting Notes records microphone audio to transcribe and summarize your meetings.</string>
 	<key>NSScreenCaptureUsageDescription</key>

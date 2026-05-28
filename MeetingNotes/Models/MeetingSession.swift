@@ -23,7 +23,9 @@ final class MeetingSession {
     var followUpItems: [String]?
     var captureModeRawValue: String
     var syncStateRawValue: String
+    var audioChunksData: Data?
     var processingError: String?
+    var summaryLanguageRawValue: String?
 
     init(
         id: UUID = UUID(),
@@ -46,7 +48,9 @@ final class MeetingSession {
         followUpItems: [String] = [],
         captureMode: CaptureMode = .microphoneOnly,
         syncState: MeetingSyncState = .localOnly,
-        processingError: String? = nil
+        audioChunks: [MeetingAudioChunk] = [],
+        processingError: String? = nil,
+        summaryLanguageRawValue: String? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -68,7 +72,14 @@ final class MeetingSession {
         self.followUpItems = followUpItems
         self.captureModeRawValue = captureMode.rawValue
         self.syncStateRawValue = syncState.rawValue
+        self.audioChunksData = try? JSONEncoder().encode(audioChunks)
         self.processingError = processingError
+        self.summaryLanguageRawValue = summaryLanguageRawValue
+    }
+
+    var summaryLanguagePreference: SummaryLanguagePreference? {
+        guard let summaryLanguageRawValue else { return nil }
+        return SummaryLanguagePreference(rawValue: summaryLanguageRawValue)
     }
 
     var status: RecordingState {
@@ -91,6 +102,16 @@ final class MeetingSession {
         return endedAt.timeIntervalSince(startedAt)
     }
 
+    var audioChunks: [MeetingAudioChunk] {
+        get {
+            guard let audioChunksData else { return [] }
+            return (try? JSONDecoder().decode([MeetingAudioChunk].self, from: audioChunksData)) ?? []
+        }
+        set {
+            audioChunksData = try? JSONEncoder().encode(newValue)
+        }
+    }
+
     func apply(summary result: MeetingSummaryResult) {
         if !result.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             title = result.title
@@ -106,17 +127,4 @@ final class MeetingSession {
         followUpItems = result.followUpItems
     }
 
-    func apply(remote session: RemoteMeetingSession) {
-        title = session.title
-        createdAt = session.createdAt
-        startedAt = session.startedAt
-        endedAt = session.endedAt
-        captureMode = session.captureMode
-        transcriptText = session.transcriptText
-        summaryText = session.summaryText
-        processingError = session.processingError
-        status = session.status.localRecordingState
-        syncState = .synced
-        apply(summary: session.summaryPayload)
-    }
 }

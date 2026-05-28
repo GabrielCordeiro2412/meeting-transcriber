@@ -12,7 +12,12 @@ final class MicrophoneRecorder {
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+        audioFile = try AVAudioFile(
+            forWriting: outputURL,
+            settings: format.settings,
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved
+        )
 
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in

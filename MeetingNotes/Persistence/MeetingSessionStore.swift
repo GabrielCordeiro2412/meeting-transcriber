@@ -9,7 +9,6 @@ protocol MeetingSessionStore {
     func session(id: UUID) throws -> MeetingSession?
     func save() throws
     func deleteMeetingSession(sessionId: UUID) throws
-    func upsertRemoteSessions(_ sessions: [RemoteMeetingSession]) throws
 }
 
 @MainActor
@@ -56,24 +55,6 @@ final class SwiftDataMeetingSessionStore: MeetingSessionStore {
     func deleteMeetingSession(sessionId: UUID) throws {
         guard let session = try session(id: sessionId) else { return }
         context.delete(session)
-        try context.save()
-    }
-
-    func upsertRemoteSessions(_ sessions: [RemoteMeetingSession]) throws {
-        for remoteSession in sessions {
-            if let existing = try session(id: remoteSession.id) {
-                existing.apply(remote: remoteSession)
-            } else {
-                let local = MeetingSession(
-                    id: remoteSession.id,
-                    title: remoteSession.title,
-                    status: remoteSession.status.localRecordingState,
-                    syncState: .synced
-                )
-                local.apply(remote: remoteSession)
-                context.insert(local)
-            }
-        }
         try context.save()
     }
 }

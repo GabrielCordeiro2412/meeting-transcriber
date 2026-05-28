@@ -1,7 +1,6 @@
 import SwiftData
 import SwiftUI
 import UserNotifications
-import Carbon.HIToolbox.Events
 
 @main
 struct MeetingNotesApp: App {
@@ -91,13 +90,6 @@ final class MeetingNotesAppDelegate: NSObject, NSApplicationDelegate, UNUserNoti
             intentIdentifiers: []
         )
         center.setNotificationCategories([category])
-
-        NSAppleEventManager.shared().setEventHandler(
-            self,
-            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
-            forEventClass: AEEventClass(kInternetEventClass),
-            andEventID: AEEventID(kAEGetURL)
-        )
     }
 
     nonisolated func userNotificationCenter(
@@ -126,16 +118,9 @@ final class MeetingNotesAppDelegate: NSObject, NSApplicationDelegate, UNUserNoti
 
         completionHandler()
     }
+}
 
-    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor) {
-        guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-              let url = URL(string: urlString) else {
-            return
-        }
-
-        let coordinator = self.coordinator
-        Task { @MainActor [weak coordinator] in
-            await coordinator?.handleAuthenticationCallback(url: url)
-        }
-    }
+enum MeetingNotificationManager {
+    static let categoryIdentifier = "meeting-notes.summary"
+    static let openActionIdentifier = "meeting-notes.open-summary"
 }
