@@ -239,8 +239,7 @@ meeting-recorder/
 │   └── Views/                 # UI (menu bar, histórico, etc.)
 ├── MeetingNotes.xcodeproj/
 ├── Open Meeting Notes.command # Launcher após build
-├── AGENTS.md                  # Regras para contribuidores e agentes de IA
-└── ROADMAP.md                 # Roadmap de produto
+└── AGENTS.md                  # Regras para contribuidores e agentes de IA
 ```
 
 ---
@@ -285,8 +284,6 @@ O app usa Keychain local com estratégia tolerante a builds de desenvolvimento. 
 ## Contribuindo
 
 Leia [AGENTS.md](./AGENTS.md) antes de alterar arquitetura ou fluxos críticos (áudio, persistência, Keychain, processamento).
-
-Roadmap de produto: [ROADMAP.md](./ROADMAP.md).
 
 ---
 
