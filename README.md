@@ -81,11 +81,9 @@ Siga os passos na ordem. O caminho abaixo usa um clone em `~/Projects/meeting-re
 ### Passo 1 — Clonar o repositório
 
 ```bash
-git clone https://github.com/SEU_USUARIO/meeting-recorder.git
-cd ~/Projects/meeting-recorder
+git clone https://github.com/GabrielCordeiro2412/meeting-transcriber.git
+cd meeting-transcriber
 ```
-
-Substitua a URL pela do seu fork/remoto real.
 
 ### Passo 2 — Abrir no Xcode (opcional, mas útil)
 
