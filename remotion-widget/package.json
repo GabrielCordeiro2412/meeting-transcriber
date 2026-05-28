@@ -1,0 +1,27 @@
+{
+  "name": "remotion-widget",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "remotion:preview": "remotion preview src/index.tsx",
+    "remotion:render": "node scripts/render.cjs",
+    "remotion:still": "node scripts/still.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@remotion/bundler": "^4.0.468",
+    "@remotion/renderer": "^4.0.468",
+    "@types/react": "^19.1.5",
+    "@types/react-dom": "^19.1.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "remotion": "^4.0.468"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

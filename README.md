@@ -15,6 +15,16 @@
   Sem login · Sem backend · Sem Supabase · Sem sync na nuvem
 </p>
 
+<p align="center">
+  <a href="./video/widget.mp4">
+    <img src="./video/widget.png" alt="Meeting Recorder widget demo" width="900" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="./video/widget.mp4"><strong>Watch the widget demo video</strong></a>
+</p>
+
 ---
 
 ## Visão geral

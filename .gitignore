@@ -11,3 +11,7 @@ backend/.meeting-notes-backend.log
 backend/.meeting-notes-backend.pid
 backend/supabase/.temp/
 supabase/.temp/
+remotion-widget/node_modules/
+remotion-widget/out/
+remotion-widget/node_modules/.cache/
+remotion-widget/node_modules/.remotion/
