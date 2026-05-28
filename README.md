@@ -17,12 +17,12 @@
 
 <p align="center">
   <a href="./video/widget.mp4">
-    <img src="./video/widget.png" alt="Meeting Recorder widget demo" width="900" />
+    <img src="./video/widget.gif" alt="Meeting Recorder widget demo" width="900" />
   </a>
 </p>
 
 <p align="center">
-  <a href="./video/widget.mp4"><strong>Watch the widget demo video</strong></a>
+  <a href="./video/widget.mp4"><strong>Watch the full MP4 version</strong></a>
 </p>
 
 ---
