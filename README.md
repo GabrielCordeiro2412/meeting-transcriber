@@ -21,9 +21,6 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="./video/widget.mp4"><strong>Watch the full MP4 version</strong></a>
-</p>
 
 ---
 
